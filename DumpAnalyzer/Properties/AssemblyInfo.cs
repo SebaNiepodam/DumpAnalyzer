@@ -8,11 +8,11 @@ using System.Windows;
 // set of attributes. Change these attribute values to modify the information
 // associated with an assembly.
 [assembly: AssemblyTitle("DumpAnalyzer")]
-[assembly: AssemblyDescription("Simple tool for analyzing dumps from Gamedec. Thanks to Destructive Creations for help with creating this tool.")]
+[assembly: AssemblyDescription("Simple tool for analyzing dumps from Unreal Engine projects.")]
 [assembly: AssemblyConfiguration("")]
-[assembly: AssemblyCompany("Anshar Studios")]
+[assembly: AssemblyCompany("Seba Niepodam")]
 [assembly: AssemblyProduct("DumpAnalyzer")]
-[assembly: AssemblyCopyright("Copyright ©  2020")]
+[assembly: AssemblyCopyright("Copyright ©  2023")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 
