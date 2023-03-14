@@ -107,13 +107,14 @@ namespace DumpAnalyzer
         {
             InitializeComponent();
             Logger.Init();
-            CrashInfo_TextBox.Text = "Tu sie pojawi cool info o crashu!";
+            CrashInfo_TextBox.Text = "Here will be infomartion about crash.";
         }
 
         private void CheckSFTPForCrashes_Button_Click(object sender, RoutedEventArgs e)
         {
             CheckSFTPForCrashes();
-        }
+            ColorButtons(sender);
+        }        
 
         private void CheckAnalyzedOnFTP_Button_Click(object sender, RoutedEventArgs e)
         {
@@ -142,6 +143,8 @@ namespace DumpAnalyzer
             Console.WriteLine("Directory List Complete, status");
 
             StatusBar_TextBlock.Text = $"Checking FTP for analyzed dumps finished. Found: {file_ListBox.Items.Count} files.";
+
+            ColorButtons(sender);
         }
 
         private void CheckAnalyzedOnVault_Button_Click(object sender, RoutedEventArgs e)
@@ -169,6 +172,15 @@ namespace DumpAnalyzer
                     idx++;
                 }
             }
+
+            ColorButtons(sender);
+        }
+
+        private void ColorButtons(object sender)
+        {
+            CheckFTPForCrashes_Button.Foreground = sender == CheckFTPForCrashes_Button ? Brushes.Green : Brushes.Black;
+            CheckAnalyzedOnFTP_Button.Foreground = sender == CheckAnalyzedOnFTP_Button ? Brushes.Green : Brushes.Black;
+            CheckAnalyzedOnVault_Button.Foreground = sender == CheckAnalyzedOnVault_Button ? Brushes.Green : Brushes.Black;
         }
 
         private ConnectionInfo GetConnectionInfo()
@@ -247,7 +259,7 @@ namespace DumpAnalyzer
         {
             try
             {
-                CrashInfo_TextBox.Text = "Tu sie pojawi info o crashu.";
+                CrashInfo_TextBox.Text = "Here will be info about crash.";
                 int SelectedFileCount = file_ListBox.SelectedItems.Count;
                 Analyze_ProgressBar.Dispatcher.Invoke(() => Analyze_ProgressBar.Value = 0, System.Windows.Threading.DispatcherPriority.Send);
                 StatusBar_TextBlock.Text = "Preparing to analyze: ";
@@ -872,7 +884,9 @@ namespace DumpAnalyzer
                     break;
                 case WorkingMode.CheckedVault:
                     if (isSomethingSelected)
-                        ReadCallstackFromVault();
+                    {                        
+                        ReadInfoFromVault();
+                    }
                     OpenDump_Button.IsEnabled = isSomethingSelected;
                     break;
             }
@@ -885,18 +899,32 @@ namespace DumpAnalyzer
             }
         }
 
-        private void ReadCallstackFromVault()
+        private void ReadInfoFromVault()
         {
             ListBoxItem selectedItem = (ListBoxItem)file_ListBox.SelectedItem;
             string vaultDir = selectedItem.Content.ToString().Substring(selectedItem.Content.ToString().IndexOf('_') + 1);
             vaultDir = Path.Combine(Properties.Settings.Default.CheckedDumpsVaultPath, vaultDir);
             if (Directory.Exists(vaultDir))
             {
+                // crash context
+                string crashContextFull = InfoGatherer.GetInfoFromCrashContextXml(vaultDir);
+                string crashContextShort = InfoGatherer.GetShortInfoFromCrashContextXml(vaultDir);
+                CrashContextInfo_TextBox.Text = crashContextFull;
+                ShortCrashContextInfo_TextBox.Text = crashContextShort;
+                // crashreporter log
                 string callstackFilePath = Path.Combine(vaultDir, "callstack.txt");
                 if (File.Exists(callstackFilePath))
                 {
                     string callstack = InfoGatherer.ReadFile(callstackFilePath);
-                    CrashInfo_TextBox.Text = callstack;
+                    string infoFromCrashReporterLogFile = InfoGatherer.GetInfoFromCrashReporterLogFile(vaultDir);
+                    
+                    CrashInfo_TextBox.Text = "\n ------------------------ Information from crash reporter ------------------------ \n";
+                    CrashInfo_TextBox.Text += infoFromCrashReporterLogFile;
+                    CrashInfo_TextBox.Text += "\n ------------------------ Callstack ------------------------ \n";
+                    CrashInfo_TextBox.Text += callstack;
+                    CrashInfo_TextBox.Text += "\n ------------------------ Callstack End ------------------------ \n";
+                    CrashInfo_TextBox.Text += "\n ------------------------ Crash Context Short ------------------------ \n";
+                    CrashInfo_TextBox.Text += "\n" + crashContextShort;
                 }
             }
 
@@ -997,7 +1025,7 @@ namespace DumpAnalyzer
             }
             catch (Exception ex)
             {
-                Logger.Log("Nie moge skasowac katalogu: " + dirToDelete + " \nError: " + ex.ToString());
+                Logger.Log("Can't delete directory: " + dirToDelete + " \nError: " + ex.ToString());
 
                 Process.Start("cmd.exe", @"/C rd /s /q " + dirToDelete);
             }
