@@ -1,19 +1,20 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
-using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
-
 using System.IO;
-using System.Net;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Timers;
+using System.Windows.Threading;
 using Renci.SshNet;
 using Renci.SshNet.Common;
+using Timer = System.Threading.Timer;
 
 namespace DumpAnalyzer
 {
@@ -43,7 +44,30 @@ namespace DumpAnalyzer
             {
                 Count = newCount;
             }
+        }
 
+        public class UserGroup
+        {
+            public string UserName;
+            public string MachineId;
+            public int Count;
+
+            public UserGroup(string inUserName, string inMachineId)
+            {
+                UserName = inUserName;
+                MachineId = inMachineId;
+                Count = 1;
+            }
+
+            public void Inc()
+            {
+                SetCount(Count + 1);
+            }
+
+            public void SetCount(int newCount)
+            {
+                Count = newCount;
+            }
         }
 
         public struct CrashInfo
@@ -58,7 +82,8 @@ namespace DumpAnalyzer
             public string InfoFromCrashReporterLog;
 
 
-            public CrashInfo(string inFullCrash, string inCallstackTop, string inRevision, string inFullName, string inDumpPath, string inCrashContextFull, string inCrashContextShort, string inCrashReporterInfo)
+            public CrashInfo(string inFullCrash, string inCallstackTop, string inRevision, string inFullName,
+                string inDumpPath, string inCrashContextFull, string inCrashContextShort, string inCrashReporterInfo)
             {
                 FullCrash = inFullCrash;
                 CallstackTop = inCallstackTop;
@@ -78,30 +103,35 @@ namespace DumpAnalyzer
             CheckedVault
         }
 
-        private WorkingMode CurrentWorkingMode;
-        List<DumpGroup> DumpGroups = new List<DumpGroup>();
+        private WorkingMode _currentWorkingMode;
+        List<DumpGroup> _dumpGroups = new List<DumpGroup>();
+        List<UserGroup> _userGroups = new List<UserGroup>();
 
-        private List<string> FileNamesOnFtp = new List<string>();
-        private List<string> UncheckedFileNamesOnFtp = new List<string>();
-        private string DirWithRevision = "";
+        private List<string> _fileNamesOnFtp = new List<string>();
+        private string _dirWithRevision = "";
 
         private static string _cdb = "cdb.exe";
-        private static string dataPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"data");
-        private static string dumpsPath = Path.Combine(dataPath, @"dumps");
-        private static string debuggersPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"data/debuggers");
+        private static string _dataPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"data");
+        private static string _dumpsPath = Path.Combine(_dataPath, @"dumps");
+        private static string _debuggersPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"data/debuggers");
 
-        private static readonly string[] callstackTopExcludedWords = { @"KERNELBASE", @"RaiseException", @"Logf", @"AssertFailed", @"ReportAssert", @"NO-FUNCTION", @"WindowsErrorOutputDevice", @"CheckVerifyFailed", @"lambda" };
+        private static readonly string[] CallstackTopExcludedWords =
+        {
+            @"KERNELBASE", @"RaiseException", @"Logf", @"AssertFailed", @"ReportAssert", @"NO-FUNCTION",
+            @"WindowsErrorOutputDevice", @"CheckVerifyFailed", @"lambda"
+        };
         //if (!CallstackFunction.Contains(@"KERNELBASE") && !CallstackFunction.Contains(@"RaiseException") && !CallstackFunction.Contains(@"Logf") && !CallstackFunction.Contains(@"AssertFailed") && !CallstackFunction.Contains(@"NO-FUNCTION") && tempCallstackTop == CallstackTop)
 
         public static string GetMainDumpPath()
         {
-            return dumpsPath;
+            return _dumpsPath;
         }
-        private static string symbolsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"data/symbols");
-        private IConnection onlineConnection;
 
-        SolidColorBrush BrushRed = new SolidColorBrush(Colors.Red);
-        SolidColorBrush BrushGreen = new SolidColorBrush(Colors.Green);
+        private static string _symbolsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"data/symbols");
+        private IConnection _onlineConnection;
+
+        SolidColorBrush _brushRed = new SolidColorBrush(Colors.Red);
+        SolidColorBrush _brushGreen = new SolidColorBrush(Colors.Green);
 
         public DumpAnalyzerWindow()
         {
@@ -112,64 +142,86 @@ namespace DumpAnalyzer
 
         private void CheckSFTPForCrashes_Button_Click(object sender, RoutedEventArgs e)
         {
-            CheckSFTPForCrashes();
-            ColorButtons(sender);
-        }        
+            {
+                CheckSftpForCrashes();
+                ColorButtons(CheckFTPForCrashes_Button);
+                //var worker = new BackgroundWorker();
+                //worker.DoWork += new DoWorkEventHandler(worker_DoWork);
+                // worker.RunWorkerAsync();
+            }
+        }
+        
+        void worker_DoWork(object sender, DoWorkEventArgs e)
+        {
+            TimerEvent(this, null);
+            //CheckSFTPForCrashes();
+            //ColorButtons(sender);
+            //StatusBar_TextBlock.Text = "PO KLIKU";
+        }
 
         private void CheckAnalyzedOnFTP_Button_Click(object sender, RoutedEventArgs e)
         {
-            CurrentWorkingMode = WorkingMode.CheckedFtp;
-            if (onlineConnection == null)
+            _currentWorkingMode = WorkingMode.CheckedFtp;
+            if (_onlineConnection == null)
             {
-                onlineConnection = new SFTP();
+                _onlineConnection = new SFTP();
             }
 
-            List<string> filesOnServer = onlineConnection.GetAnalyzedDumpsFromServer();
-            FileNamesOnFtp.Clear();
+            List<string> filesOnServer = _onlineConnection.GetAnalyzedDumpsFromServer();
+            _fileNamesOnFtp.Clear();
             file_ListBox.Items.Clear();
             int idx = 0;
-            foreach (string File in filesOnServer)
+            foreach (string file in filesOnServer)
             {
-                FileNamesOnFtp.Add(File);
-                string Revision = GetRevisionFromFileName(File);
+                _fileNamesOnFtp.Add(file);
+                string revision = GetRevisionFromFileName(file);
                 ListBoxItem lbi = new ListBoxItem
                 {
-                    Foreground = IsRevisionOK(Revision) ? BrushGreen : BrushRed,
-                    Content = $"{idx}_{File}"
+                    Foreground = IsRevisionOk(revision) ? _brushGreen : _brushRed,
+                    Content = $"{idx}_{file}"
                 };
                 file_ListBox.Items.Add(lbi);
                 idx++;
             }
+
             Console.WriteLine("Directory List Complete, status");
 
-            StatusBar_TextBlock.Text = $"Checking FTP for analyzed dumps finished. Found: {file_ListBox.Items.Count} files.";
+            StatusBar_TextBlock.Text =
+                $"Checking FTP for analyzed dumps finished. Found: {file_ListBox.Items.Count} files.";
 
             ColorButtons(sender);
         }
 
         private void CheckAnalyzedOnVault_Button_Click(object sender, RoutedEventArgs e)
         {
-            CurrentWorkingMode = WorkingMode.CheckedVault;
+            _currentWorkingMode = WorkingMode.CheckedVault;
             file_ListBox.Items.Clear();
             CrashInfo_ListBox.Items.Clear();
+            ShortCrashContextInfo_TextBox.Clear();
             string vaultDirectoryPath = Properties.Settings.Default.CheckedDumpsVaultPath;
             if (Directory.Exists(vaultDirectoryPath))
             {
-                StatusBar_TextBlock.Text = $"Checking Vault for analyzed dumps finished. Found: {file_ListBox.Items.Count} files.";
-
                 string[] analyzedDumps = Directory.GetDirectories(vaultDirectoryPath);
                 int idx = 0;
+                string filterString = Filter_TextBox.Text.ToLower();
+                
+                StatusBar_TextBlock.Text = $"Checking Vault for analyzed dumps finished. Found: {analyzedDumps.Length} files.";
+                ForceUpdateUi();
+                
                 foreach (string analyzedDump in analyzedDumps)
                 {
-                    string dumpName = Path.GetFileName(analyzedDump);
-                    string Revision = GetRevisionFromFileName(dumpName);
-                    ListBoxItem lbi = new ListBoxItem
+                    if (analyzedDump.ToLower().Contains(filterString))
                     {
-                        Foreground = IsRevisionOK(Revision) ? BrushGreen : BrushRed,
-                        Content = $"{idx}_{dumpName}"
-                    };
-                    file_ListBox.Items.Add(lbi);
-                    idx++;
+                        string dumpName = Path.GetFileName(analyzedDump);
+                        string revision = GetRevisionFromFileName(dumpName);
+                        ListBoxItem lbi = new ListBoxItem
+                        {
+                            Foreground = IsRevisionOk(revision) ? _brushGreen : _brushRed,
+                            Content = $"{idx}_{dumpName}"
+                        };
+                        file_ListBox.Items.Add(lbi);
+                        idx++;
+                    }
                 }
             }
 
@@ -180,7 +232,8 @@ namespace DumpAnalyzer
         {
             CheckFTPForCrashes_Button.Foreground = sender == CheckFTPForCrashes_Button ? Brushes.Green : Brushes.Black;
             CheckAnalyzedOnFTP_Button.Foreground = sender == CheckAnalyzedOnFTP_Button ? Brushes.Green : Brushes.Black;
-            CheckAnalyzedOnVault_Button.Foreground = sender == CheckAnalyzedOnVault_Button ? Brushes.Green : Brushes.Black;
+            CheckAnalyzedOnVault_Button.Foreground =
+                sender == CheckAnalyzedOnVault_Button ? Brushes.Green : Brushes.Black;
         }
 
         private ConnectionInfo GetConnectionInfo()
@@ -197,32 +250,37 @@ namespace DumpAnalyzer
             return connectionInfo;
         }
 
-        private void CheckSFTPForCrashes()
+        private void CheckSftpForCrashes()
         {
-            CurrentWorkingMode = WorkingMode.UncheckedFtp;
+            StatusBar_TextBlock.Text = $"Checking dumps on FTP. It may take a while, please be patient and wait.";
+            ForceUpdateUi();
+            _currentWorkingMode = WorkingMode.UncheckedFtp;
             try
             {
-                if (onlineConnection == null)
+                if (_onlineConnection == null)
                 {
-                    onlineConnection = new SFTP();
+                    _onlineConnection = new SFTP();
                 }
-                List<string> filesOnServer = onlineConnection.GetFilesFromServer();
-                FileNamesOnFtp.Clear();
+                
+                Analyze_ProgressBar.Dispatcher.Invoke(() => Analyze_ProgressBar.Value = 55, System.Windows.Threading.DispatcherPriority.Send);
+                ForceUpdateUi();
+                List<string> filesOnServer = _onlineConnection.GetFilesFromServer();
+                
+                _fileNamesOnFtp.Clear();
                 file_ListBox.Items.Clear();
                 int idx = 0;
-                foreach (var File in filesOnServer)
+                foreach (var file in filesOnServer)
                 {
-                    FileNamesOnFtp.Add(File);
-                    string Revision = GetRevisionFromFileName(File);
+                    _fileNamesOnFtp.Add(file);
+                    string revision = GetRevisionFromFileName(file);
                     ListBoxItem lbi = new ListBoxItem
                     {
-                        Foreground = IsRevisionOK(Revision) ? BrushGreen : BrushRed,
-                        Content = $"{idx}_{File}"
+                        Foreground = IsRevisionOk(revision) ? _brushGreen : _brushRed,
+                        Content = $"{idx}_{file}"
                     };
                     file_ListBox.Items.Add(lbi);
                     idx++;
                 }
-                Console.WriteLine("Directory List Complete, status");
 
                 StatusBar_TextBlock.Text = $"Checking FTP finished. Found: {file_ListBox.Items.Count} files.";
             }
@@ -249,10 +307,10 @@ namespace DumpAnalyzer
         private void CleanCrashInfos()
         {
             CrashInfo_ListBox.Items.Clear();
-            CrashInfos.Clear();
-            FilteredCrashInfos.Clear();
-            CrashInfosNames.Clear();
-            DumpGroups.Clear();
+            _crashInfos.Clear();
+            _filteredCrashInfos.Clear();
+            _crashInfosNames.Clear();
+            _dumpGroups.Clear();
         }
 
         private void AnalyzeCrashOnFTP()
@@ -260,12 +318,12 @@ namespace DumpAnalyzer
             try
             {
                 CrashInfo_TextBox.Text = "Here will be info about crash.";
-                int SelectedFileCount = file_ListBox.SelectedItems.Count;
-                Analyze_ProgressBar.Dispatcher.Invoke(() => Analyze_ProgressBar.Value = 0, System.Windows.Threading.DispatcherPriority.Send);
-                StatusBar_TextBlock.Text = "Preparing to analyze: ";
-                float ProgressBarStep = 100 / SelectedFileCount;
+                int selectedFileCount = file_ListBox.SelectedItems.Count;
+                Analyze_ProgressBar.Dispatcher.Invoke(() => Analyze_ProgressBar.Value = 0,
+                    System.Windows.Threading.DispatcherPriority.Send);
+                float progressBarStep = 100 / selectedFileCount;
 
-                for (int i = 0; i < SelectedFileCount; ++i)
+                for (int i = 0; i < selectedFileCount; ++i)
                 {
                     bool bError = false;
                     string fileName = "";
@@ -273,7 +331,7 @@ namespace DumpAnalyzer
                     string dirName = "";
                     string localDirPath = "";
                     string newDirName = "";
-                    string CallstackTop = "";
+                    string callstackTop = "";
                     try
                     {
                         ListBoxItem lbi = (ListBoxItem)file_ListBox.SelectedItems[i];
@@ -281,7 +339,7 @@ namespace DumpAnalyzer
                         int fileIdx = fileName.IndexOf('_') + 1;
                         if (fileIdx == 0)
                         {
-                            MessageBox.Show("Cosik sie popsulo przy analizie... zla nazwa pliku");
+                            MessageBox.Show("Something went wrong... probably bad filename");
                             continue;
                         }
 
@@ -291,64 +349,76 @@ namespace DumpAnalyzer
                             fileName = fileName.Substring(fileIdx);
                         localFileName = GetFileNameWithoutInvalidChars(fileName);
                         dirName = Path.GetFileNameWithoutExtension(localFileName);
+                        string analyzedFilesBeginString = "Analyzed files: " + (i + 1).ToString() + @"/" + selectedFileCount.ToString() + " - " + localFileName;
+                        UpdateStatusBar(analyzedFilesBeginString + $" --- Preparing to analyze.");
+                        string revision = GetRevisionFromFileName(dirName);
 
-                        string Revision = GetRevisionFromFileName(dirName);
-
-                        if (IsRevisionOK(Revision))
+                        if (IsRevisionOk(revision))
                         {
-                            DirWithRevision = Revision.ToString();
+                            _dirWithRevision = revision.ToString();
                         }
                         else
-                            DirWithRevision = "";
+                            _dirWithRevision = "";
 
-                        localDirPath = Path.Combine(GetMainDumpPath(), DirWithRevision, dirName);
+                        localDirPath = Path.Combine(GetMainDumpPath(), _dirWithRevision, dirName);
 
                         DownloadFile(fileName, localFileName);
                         UnpackFile(localFileName, localDirPath);
                         // real analyze of dump begins now
+                        UpdateStatusBar(analyzedFilesBeginString + $" --- Generating callstack");
                         string cdbCallstack = GenerateCallstackWithCdb(localDirPath);
-                        string CrashContextFull = InfoGatherer.GetInfoFromCrashContextXml(localDirPath);
-                        string CrashContextShort = InfoGatherer.GetShortInfoFromCrashContextXml(localDirPath);
-                        string CallStack = cdbCallstack;
-                        CallstackTop = "Unknown";
-                        ProcessNewCallstackCDB(ref cdbCallstack, ref CallstackTop);
-                        CreateCallstackFile(ref cdbCallstack,  ref CallstackTop, localDirPath, fileName);
+                        string crashContextFull = InfoGatherer.GetInfoFromCrashContextXml(localDirPath);
+                        string crashContextShort = InfoGatherer.GetShortInfoFromCrashContextXml(localDirPath);
+                        string callStack = cdbCallstack;
+                        string userName = InfoGatherer.GetUsernameInfoFromCrashReporter(ref localDirPath);
+                        string machineId = InfoGatherer.GetMachineIdInfoFromCrashContext(ref crashContextFull);
+                        callstackTop = "Unknown";
+                        ProcessNewCallstackCdb(ref cdbCallstack, ref callstackTop);
+                        CreateCallstackFile(ref cdbCallstack, ref callstackTop, localDirPath, fileName);
 
-                        List<string> FullCallstack = GetFullCallstackFromCDB(ref cdbCallstack);
-                        
+                        List<string> fullCallstack = GetFullCallstackFromCdb(ref cdbCallstack);
+
                         string randomNumber = GetRandomNumberFromFileName(dirName);
                         newDirName = dirName;
                         if (randomNumber.Length > 0)
-                            newDirName = dirName.Replace(randomNumber, CallstackTop);
+                            newDirName = dirName.Replace(randomNumber, callstackTop);
                         else
-                            newDirName = dirName.Insert(22, CallstackTop);
+                            newDirName = dirName.Insert(22, callstackTop);
 
                         SetDumpAsChecked(localDirPath, newDirName);
                         RemoveFromFtpAfterAnalyze(fileName);
 
-
-                        string CrashInfoName = helperIdx + "_" + newDirName;
-                        CrashInfosNames.Add(CrashInfoName);
-                        CrashInfo_ListBox.Items.Add(CrashInfoName);
+                        string crashInfoName = helperIdx + "_" + newDirName;
+                        _crashInfosNames.Add(crashInfoName);
+                        CrashInfo_ListBox.Items.Add(crashInfoName);
                         string dumpPath = dirName;
-                        string FullCrashInfo = "Path to unpacked dump: " + dumpPath + " " + "\n" + CallStack;
+                        string fullCrashInfo = "Path to unpacked dump: " + dumpPath + " " + "\n" + callStack;
                         string infoFromCrashReporterLog = InfoGatherer.GetInfoFromCrashReporterLogFile(localDirPath);
-                        CrashInfo info = new CrashInfo(cdbCallstack, CallstackTop, Revision, CrashInfoName, dumpPath, CrashContextFull, CrashContextShort, infoFromCrashReporterLog);
-                        CrashInfos.Add(info);
-                        FilteredCrashInfos.Add(info);
-                        AddToDumpGroups(CallstackTop, FullCallstack, dumpPath);
+                        CrashInfo info = new CrashInfo(cdbCallstack, callstackTop, revision, crashInfoName, dumpPath,
+                            crashContextFull, crashContextShort, infoFromCrashReporterLog);
+                        _crashInfos.Add(info);
+                        _filteredCrashInfos.Add(info);
+                        AddToDumpGroups(callstackTop, fullCallstack, dumpPath);
+                        AddToUserGroups(userName, machineId);
                     }
                     catch (System.IO.PathTooLongException)
                     {
-                        MessageBox.Show("Za dluga nazwa pliku (pewnie problem z odpakowaniem zipa) !!!!", "Path Too Long Exception", MessageBoxButton.OK);                                                
-                        SelectedFileCount--;
+                        MessageBox.Show("Za dluga nazwa pliku (pewnie problem z odpakowaniem zipa) !!!!",
+                            "Path Too Long Exception", MessageBoxButton.OK);
+                        selectedFileCount--;
                         --i;
                     }
                     catch (System.Exception ex)
                     {
                         bError = true;
-                        Logger.Log("Error on Analyze single crash. \nFilename: " + fileName + "\nLocal File Name: " + localFileName + "\nDirName: " + dirName + "\nNewDirName: " + newDirName + "\nCallstackTop: " + CallstackTop + "\n" + ex.ToString());
-                        MessageBox.Show("Error on Analyze single crash. \nFilename: " + fileName + "\nLocal File Name: " + localFileName + "\nDirName: " + dirName + "\nNewDirName: " + newDirName + "\nCallstackTop: " + CallstackTop + "\n" + ex.ToString(), @"Cos nie zabanglało", MessageBoxButton.OK);
+                        Logger.Log("Error on Analyze single crash. \nFilename: " + fileName + "\nLocal File Name: " +
+                                   localFileName + "\nDirName: " + dirName + "\nNewDirName: " + newDirName +
+                                   "\nCallstackTop: " + callstackTop + "\n" + ex.ToString());
+                        MessageBox.Show(
+                            "Error on Analyze single crash. \nFilename: " + fileName + "\nLocal File Name: " +
+                            localFileName + "\nDirName: " + dirName + "\nNewDirName: " + newDirName +
+                            "\nCallstackTop: " + callstackTop + "\n" + ex.ToString(), @"Cos nie zabanglało",
+                            MessageBoxButton.OK);
                     }
                     finally
                     {
@@ -361,16 +431,15 @@ namespace DumpAnalyzer
                             }
                             catch (System.Exception ex)
                             {
-                                string msg = "Error on trying to delete: " + Path.Combine(DirWithRevision, localFileName) + "\nDirectory: " + Path.Combine(DirWithRevision, dirName) + "\nError: " + ex.ToString();
+                                string msg = "Error on trying to delete: " +
+                                             Path.Combine(_dirWithRevision, localFileName) + "\nDirectory: " +
+                                             Path.Combine(_dirWithRevision, dirName) + "\nError: " + ex.ToString();
                                 Logger.Log(msg);
                             }
                         }
 
-                        this.Dispatcher.Invoke(() =>
-                        {
-                            Analyze_ProgressBar.Value += ProgressBarStep;
-                            StatusBar_TextBlock.Text = "Analyzed files: " + (i + 1).ToString() + @"/" + SelectedFileCount.ToString();
-                        }, System.Windows.Threading.DispatcherPriority.Background);
+                        Analyze_ProgressBar.Value += progressBarStep;
+                        UpdateStatusBar("Analyzed files: " + (i + 1).ToString() + @"/" + selectedFileCount.ToString() + " - " + localFileName);
                     }
                 }
 
@@ -390,19 +459,18 @@ namespace DumpAnalyzer
         {
             if (Properties.Settings.Default.IsRemoveFromFtpAfterAnalyze)
             {
-                onlineConnection.RemoveAfterAnalyze(fileToRemove);
+                _onlineConnection.RemoveAfterAnalyze(fileToRemove);
             }
         }
 
         private void SetDumpAsChecked(string localDirPath, string targetDirPath)
         {
-
             string directoryName = Path.GetFileName(localDirPath).TrimEnd(Path.DirectorySeparatorChar);
             string targetDirectory = Path.Combine(Properties.Settings.Default.CheckedDumpsFtpPath, targetDirPath);
             //1. upload to ftp
             if (Properties.Settings.Default.IsCopyToFtpEnabled)
             {
-                onlineConnection.UploadDirectory(localDirPath, targetDirectory);
+                _onlineConnection.UploadDirectory(localDirPath, targetDirectory);
             }
 
             //2. copy to valut
@@ -419,7 +487,7 @@ namespace DumpAnalyzer
 
             try
             {
-                onlineConnection.DownloadFile(fileName, localFileName);
+                _onlineConnection.DownloadFile(fileName, localFileName);
             }
             catch (Exception e)
             {
@@ -469,7 +537,7 @@ namespace DumpAnalyzer
             {
                 prompt.Response = Properties.Settings.Default.FTP_Password;
             }
-        }        
+        }
 
         //copied from StackOverflow
         private static void DirectoryCopy(string sourceDirName, string destDirName, bool copySubDirs)
@@ -514,7 +582,6 @@ namespace DumpAnalyzer
                 // If copySubDirs is true, copy the subdirectories.
                 if (copySubDirs)
                 {
-
                     foreach (DirectoryInfo subdir in dirs)
                     {
                         // Create the subdirectory.
@@ -531,14 +598,14 @@ namespace DumpAnalyzer
             }
         }
 
-        private List<CrashInfo> CrashInfos = new List<CrashInfo>();
-        private List<CrashInfo> FilteredCrashInfos = new List<CrashInfo>();
-        private List<string> CrashInfosNames = new List<string>();
-        
+        private List<CrashInfo> _crashInfos = new List<CrashInfo>();
+        private List<CrashInfo> _filteredCrashInfos = new List<CrashInfo>();
+        private List<string> _crashInfosNames = new List<string>();
+
 
         private string GetRandomNumberFromFileName(string fileName)
         {
-            //fileName = "gd_debug_2020_05_25__08_10_686896181_20200522_0_99_22_r19214.7z";
+            fileName = fileName.Replace('.', '_');
             string[] separatingStrings = { "__" };
             string randomNumber = fileName.Split(separatingStrings, StringSplitOptions.RemoveEmptyEntries).Last();
             string[] temp = randomNumber.Split('_');
@@ -556,7 +623,7 @@ namespace DumpAnalyzer
 
         private void OpenDump_Button_Click(object sender, RoutedEventArgs e)
         {
-            switch (CurrentWorkingMode)
+            switch (_currentWorkingMode)
             {
                 case WorkingMode.UncheckedFtp:
                     OpenLocalDump();
@@ -590,13 +657,12 @@ namespace DumpAnalyzer
                     OpenDump(dumpPath, revision);
                 }
             }
-
         }
 
         private void OpenLocalDump()
         {
             // check if *.dmp file is in local directory
-            string dirName = FilteredCrashInfos[CrashInfo_ListBox.SelectedIndex].DumpPath;
+            string dirName = _filteredCrashInfos[CrashInfo_ListBox.SelectedIndex].DumpPath;
             string revision = GetRevisionFromFileName(dirName).ToString();
             string filePath = Path.Combine(GetMainDumpPath(), revision, dirName);
             string dumpPath = "";
@@ -611,7 +677,7 @@ namespace DumpAnalyzer
         {
             if (File.Exists(dumpPath))
             {
-                MakeSymbolicLinkToPDB(dumpPath, revision);
+                MakeSymbolicLinkToPdbAndExe(dumpPath, revision);
                 ProcessStartInfo startInfo = new ProcessStartInfo(dumpPath);
                 string tempCurrDirectory = Environment.CurrentDirectory;
                 Environment.CurrentDirectory = Path.GetDirectoryName(dumpPath);
@@ -620,63 +686,84 @@ namespace DumpAnalyzer
             }
         }
 
-        private void MakeSymbolicLinkToPDB(string dumpPath, string revision)
+        private void MakeSymbolicLinkToPdbAndExe(string dumpPath, string revision)
         {
-            string PathToPDB = Path.Combine(GetMainDumpPath(), revision);
-            string[] pdbFiles = Directory.GetFiles(PathToPDB, "*.pdb", SearchOption.TopDirectoryOnly);
+            string pathToPdb = Path.Combine(GetMainDumpPath(), revision);
+            //string[] pdbFiles = Directory.GetFiles(pathToPdb, "*.pdb,*.exe", SearchOption.TopDirectoryOnly);
+            List<string> pdbFiles = Directory.EnumerateFiles(pathToPdb).Where(file => file.ToLower().EndsWith(".pdb") || file.ToLower().EndsWith(".exe")).ToList();
+
             string targetDirectory = Path.GetDirectoryName(dumpPath);
-            if (pdbFiles.Length > 0)
+            foreach (string pdbFile in pdbFiles)
             {
                 string fileName = Path.GetFileName(pdbFiles[0]);
-                string mklinkCommand = @"/C mklink /h " + targetDirectory + "\\" + fileName + " " + pdbFiles[0];
-
+                string mklinkCommand = @"/C mklink /h " + targetDirectory + "\\" + fileName + " " + pdbFile;
                 Process.Start("cmd.exe", mklinkCommand).WaitForExit();
-                Thread.Sleep(1000);
+                Thread.Sleep(300);
             }
         }
 
         private void Test_Button_Click(object sender, RoutedEventArgs e)
         {
-
         }
 
-        private void AddToDumpGroups(string CallstackTop, List<string> FullCallstack, string DumpLocations)
+        private void AddToDumpGroups(string callstackTop, List<string> fullCallstack, string dumpLocations)
         {
-            for (int i = 0; i < DumpGroups.Count; ++i)
+            for (int i = 0; i < _dumpGroups.Count; ++i)
             {
-                DumpGroup CurrDumpGroup = DumpGroups[i];
-                if (CurrDumpGroup.TopLine == CallstackTop)
+                DumpGroup currDumpGroup = _dumpGroups[i];
+                if (currDumpGroup.TopLine == callstackTop)
                 {
-                    CurrDumpGroup.Callstack.Add(FullCallstack);
-                    CurrDumpGroup.PathToDump.Add(DumpLocations);
-                    CurrDumpGroup.Inc();
+                    currDumpGroup.Callstack.Add(fullCallstack);
+                    currDumpGroup.PathToDump.Add(dumpLocations);
+                    currDumpGroup.Inc();
                     return;
                 }
             }
 
-            DumpGroup NewDumpGroup = new DumpGroup(CallstackTop);            
-            NewDumpGroup.Callstack.Add(FullCallstack);
-            NewDumpGroup.PathToDump.Add(DumpLocations);
+            DumpGroup newDumpGroup = new DumpGroup(callstackTop);
+            newDumpGroup.Callstack.Add(fullCallstack);
+            newDumpGroup.PathToDump.Add(dumpLocations);
 
-            DumpGroups.Add(NewDumpGroup);
+            _dumpGroups.Add(newDumpGroup);
+        }
+
+        private void AddToUserGroups(string inUserName, string inMachineId)
+        {
+            for (int i = 0; i < _userGroups.Count; ++i)
+            {
+                UserGroup currUserGroup = _userGroups[i];
+                if (currUserGroup.MachineId == inMachineId)
+                {
+                    if (currUserGroup.UserName != inUserName)
+                    {
+                        currUserGroup.UserName += " " + inUserName;
+                    }
+                    currUserGroup.Inc();
+                    return;
+                }
+            }
+
+            UserGroup newUserGroup = new UserGroup(inMachineId, inUserName);
+            _userGroups.Add(newUserGroup);
         }
 
         private void ShowDumpGroups()
         {
-            if (file_ListBox.SelectedItems.Count > 3 && DumpGroups.Count > 0)
+            if (file_ListBox.SelectedItems.Count > 3 && _dumpGroups.Count > 0)
             {
-                DumpGroups.Sort((a, b) => b.Count.CompareTo(a.Count));                
-                int TotalCrashes = DumpGroups[0].Count;
-                string ResultString = DumpGroups[0].TopLine + "  " + "Count: " + DumpGroups[0].Count + "\n";
+                _dumpGroups.Sort((a, b) => b.Count.CompareTo(a.Count));
+                int totalCrashes = _dumpGroups[0].Count;
+                string resultString = _dumpGroups[0].TopLine + "  " + "Count: " + _dumpGroups[0].Count + "\n";
 
-                for (int i = 1; i < DumpGroups.Count; ++i)
+                for (int i = 1; i < _dumpGroups.Count; ++i)
                 {
-                    ResultString += DumpGroups[i].TopLine + "  " + "Count: " + DumpGroups[i].Count + "\n";
-                    TotalCrashes += DumpGroups[i].Count;
+                    resultString += _dumpGroups[i].TopLine + "  " + "Count: " + _dumpGroups[i].Count + "\n";
+                    totalCrashes += _dumpGroups[i].Count;
                 }
-                ResultString += "\n W sumie crashy: " + TotalCrashes.ToString();
 
-                // pobierz rewizje z zaznaczonego pliku
+                resultString += "\n Total crashes: " + totalCrashes.ToString();
+
+                // get revision from selected files
                 List<string> revisions = new List<string>();
                 for (int i = 0; i < file_ListBox.SelectedItems.Count; ++i)
                 {
@@ -687,12 +774,13 @@ namespace DumpAnalyzer
                         revisions.Add(revision);
                 }
 
-                string TitleString = "Podsumowanie z rewizji: " + String.Join(", ", revisions.ToArray());
+                string titleString = "Summary from revision: " + String.Join(", ", revisions.ToArray());
 
-                MessageBoxResult messegeBoxResult = MessageBox.Show(ResultString, TitleString, MessageBoxButton.OKCancel);
+                MessageBoxResult messegeBoxResult =
+                    MessageBox.Show(resultString, titleString, MessageBoxButton.OKCancel);
                 if (messegeBoxResult == MessageBoxResult.OK)
                 {
-                    Slack.SendMessage(ResultString, TitleString);
+                    Slack.SendMessage(resultString, titleString);
                 }
             }
         }
@@ -706,6 +794,7 @@ namespace DumpAnalyzer
                 inFileName = inFileName.Replace(c.ToString(), "");
             }
 
+            inFileName = inFileName.Replace('.','_').Replace("_7z", ".7z");
             return inFileName;
         }
 
@@ -716,23 +805,23 @@ namespace DumpAnalyzer
             if (Filter_CheckBox.IsChecked.GetValueOrDefault() == true)
             {
                 file_ListBox.Items.Clear();
-                for (int i = 0; i < FileNamesOnFtp.Count; ++i)
+                for (int i = 0; i < _fileNamesOnFtp.Count; ++i)
                 {
-                    string RandomNum = GetRandomNumberFromFileName(FileNamesOnFtp[i]);
-                    bool bIsNumeric = int.TryParse(RandomNum, out int value);
+                    string randomNum = GetRandomNumberFromFileName(_fileNamesOnFtp[i]);
+                    bool bIsNumeric = int.TryParse(randomNum, out int value);
                     if (bIsNumeric)
                     {
-                        string Revision = GetRevisionFromFileName(FileNamesOnFtp[i]);
+                        string revision = GetRevisionFromFileName(_fileNamesOnFtp[i]);
 
-                        string RevisionFromFilter = Filter_TextBox.Text;
+                        string revisionFromFilter = Filter_TextBox.Text;
                         bool filterOn = Filter_TextBox.Text.Length > 0;
 
-                        if (!filterOn || (RevisionFromFilter == Revision))
+                        if (!filterOn || (revisionFromFilter == revision))
                         {
                             ListBoxItem lbi = new ListBoxItem
                             {
-                                Foreground = IsRevisionOK(Revision) ? BrushGreen : BrushRed,
-                                Content = idx++.ToString() + "_" + FileNamesOnFtp[i]
+                                Foreground = IsRevisionOk(revision) ? _brushGreen : _brushRed,
+                                Content = idx++.ToString() + "_" + _fileNamesOnFtp[i]
                             };
                             file_ListBox.Items.Add(lbi);
                         }
@@ -742,13 +831,13 @@ namespace DumpAnalyzer
             else
             {
                 file_ListBox.Items.Clear();
-                for (int i = 0; i < FileNamesOnFtp.Count; ++i)
+                for (int i = 0; i < _fileNamesOnFtp.Count; ++i)
                 {
-                    string Revision = GetRevisionFromFileName(FileNamesOnFtp[i]);
+                    string revision = GetRevisionFromFileName(_fileNamesOnFtp[i]);
                     ListBoxItem lbi = new ListBoxItem
                     {
-                        Foreground = IsRevisionOK(Revision) ? BrushGreen : BrushRed,
-                        Content = idx++.ToString() + "_" + FileNamesOnFtp[i]
+                        Foreground = IsRevisionOk(revision) ? _brushGreen : _brushRed,
+                        Content = idx++.ToString() + "_" + _fileNamesOnFtp[i]
                     };
                     file_ListBox.Items.Add(lbi);
                 }
@@ -757,50 +846,110 @@ namespace DumpAnalyzer
 
         private void Filter_Button_Click(object sender, RoutedEventArgs e)
         {
+            switch (_currentWorkingMode)
+            {
+                case WorkingMode.UncheckedFtp:
+                    FilterFilesOnFtp();
+                    break;
+                case WorkingMode.CheckedFtp:
+                    break;
+                case WorkingMode.CheckedVault:
+                    FilterFilesOnLocalDrive();
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException();
+            }
+        }
+
+        void FilterFilesOnFtp()
+        {
             string filterString = Filter_TextBox.Text;
             file_ListBox.Items.Clear();
 
-            for (int i = 0; i < FileNamesOnFtp.Count; ++i)
+            for (int i = 0; i < _fileNamesOnFtp.Count; ++i)
             {
-                if (FileNamesOnFtp[i].ToLower().Contains(filterString.ToLower()))
+                if (_fileNamesOnFtp[i].ToLower().Contains(filterString.ToLower()))
                 {
-                    string Revision = GetRevisionFromFileName(FileNamesOnFtp[i]);
+                    string revision = GetRevisionFromFileName(_fileNamesOnFtp[i]);
                     ListBoxItem lbi = new ListBoxItem
                     {
-                        Foreground = IsRevisionOK(Revision) ? BrushGreen : BrushRed,
-                        Content = i.ToString() + "_" + FileNamesOnFtp[i]
+                        Foreground = IsRevisionOk(revision) ? _brushGreen : _brushRed,
+                        Content = i.ToString() + "_" + _fileNamesOnFtp[i]
                     };
                     file_ListBox.Items.Add(lbi);
                 }
             }
 
-            FilteredCrashInfos.Clear();
-            List<string> LocalCrashInfosNames = new List<string>();
-            for (int i = 0; i < CrashInfos.Count; ++i)
+            _filteredCrashInfos.Clear();
+            List<string> localCrashInfosNames = new List<string>();
+            for (int i = 0; i < _crashInfos.Count; ++i)
             {
-                CrashInfo CurrInfo = CrashInfos[i];
-                if (CurrInfo.FullName.ToLower().Contains(filterString.ToLower()))
+                CrashInfo currInfo = _crashInfos[i];
+                if (currInfo.FullName.ToLower().Contains(filterString.ToLower()))
                 {
-                    FilteredCrashInfos.Add(CurrInfo);
-                    LocalCrashInfosNames.Add(CrashInfosNames[i]);
+                    _filteredCrashInfos.Add(currInfo);
+                    localCrashInfosNames.Add(_crashInfosNames[i]);
                 }
             }
 
             CrashInfo_ListBox.Items.Clear();
-            for (int i = 0; i < FilteredCrashInfos.Count; ++i)
+            for (int i = 0; i < _filteredCrashInfos.Count; ++i)
             {
-                CrashInfo_ListBox.Items.Add(LocalCrashInfosNames[i]);
+                CrashInfo_ListBox.Items.Add(localCrashInfosNames[i]);
             }
+        }
+
+        void FilterFilesOnLocalDrive()
+        {
+            CheckAnalyzedOnVault_Button_Click(CheckAnalyzedOnVault_Button, null);
+        }
+
+        public void UpdateStatusBar(string newStatusBarString)
+        {
+            StatusBar_TextBlock.Text = newStatusBarString;
+            ForceUpdateUi();
+        }
+
+        public void ForceUpdateUi()
+        {
+            //Here update your label, button or any string related object.
+            
+            //Dispatcher.CurrentDispatcher.Invoke(DispatcherPriority.Background, new ThreadStart(delegate { }));    
+            Application.Current.Dispatcher.Invoke(DispatcherPriority.Background, new ThreadStart(delegate { }));
+        }
+
+        private int _testInt222 = 0;
+        public void TimerEvent(object source, ElapsedEventArgs e)
+        {
+            //var worker = new BackgroundWorker();
+            //worker.DoWork += new DoWorkEventHandler(worker_DoWork);
+            // worker.RunWorkerAsync();
+            StatusBar_TextBlock.Dispatcher.Invoke(() => StatusBar_TextBlock.Text = $"testInt222 = {_testInt222}", System.Windows.Threading.DispatcherPriority.Send);
+            //StatusBar_TextBlock.Text = $"testInt222 = {testInt222}";
+            ForceUpdateUi();
+            _testInt222++;
+        }
+        
+        private void dispatcherTimer_Tick(object sender, EventArgs e)
+        {
+            // Updating the Label which displays the current second
+            StatusBar_TextBlock.Text = $"testInt222 = {_testInt222}";
+            ForceUpdateUi();
+            _testInt222++;
+            // Forcing the CommandManager to raise the RequerySuggested event
+            CommandManager.InvalidateRequerySuggested();
         }
 
         private void Count_Button_Click(object sender, RoutedEventArgs e)
         {
             Dictionary<string, int> resultDict = new Dictionary<string, int>();
+            Dictionary<string, int> uniqueUsersDict = new Dictionary<string, int>();
             string revision = "Unknown.";
             for (int i = 0; i < file_ListBox.SelectedItems.Count; ++i)
             {
                 ListBoxItem lbi = (ListBoxItem)file_ListBox.SelectedItems[i];
                 string functionName = lbi.Content.ToString();
+                string fileName = lbi.Content.ToString();
                 if (revision == "Unknown.")
                 {
                     revision = GetRevisionFromFileName(functionName).ToString();
@@ -819,6 +968,22 @@ namespace DumpAnalyzer
                 {
                     resultDict.Add(functionName, 1);
                 }
+
+                if (_currentWorkingMode == WorkingMode.CheckedVault)
+                {
+                    string userName = InfoGatherer.GetUsernameInfoFromCrashReporter(ref fileName);
+                    string crashContextFile = InfoGatherer.GetCrashContextFile(ref fileName);
+                    string machineId = InfoGatherer.GetMachineIdInfoFromCrashContext(ref crashContextFile);
+                    userName += "  - ID: " + machineId + "   "; 
+                    if (uniqueUsersDict.ContainsKey(userName))
+                    {
+                        uniqueUsersDict[userName] += 1;
+                    }
+                    else
+                    {
+                        uniqueUsersDict.Add(userName, 1);
+                    }
+                }
             }
 
             string resultString = "Selected files: " + file_ListBox.SelectedItems.Count.ToString();
@@ -828,9 +993,17 @@ namespace DumpAnalyzer
                 resultString += "\n" + item.Key.ToString() + " Count: " + item.Value.ToString();
             }
 
-            string titleString = "Podsumowanie z rewizji: " + revision;
+            resultString += Environment.NewLine + Environment.NewLine + "Unique users:" + Environment.NewLine;
+            
+            foreach (KeyValuePair<string, int> item in uniqueUsersDict.OrderByDescending(x => x.Value))
+            {
+                resultString += "\n" + item.Key.ToString() + " Count: " + item.Value.ToString();
+            }
 
-            MessageBoxResult messegeBoxResult = MessageBox.Show(resultString, "Podsumowanie", MessageBoxButton.OKCancel);
+            string titleString = "Summary from revision: " + revision;
+
+            MessageBoxResult messegeBoxResult =
+                MessageBox.Show(resultString, "Summary", MessageBoxButton.OKCancel);
             if (messegeBoxResult == MessageBoxResult.OK)
             {
                 Slack.SendMessage(resultString, titleString);
@@ -847,23 +1020,25 @@ namespace DumpAnalyzer
 
         private void CrashInfo_ListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            bool IsSomethingSelected = CrashInfo_ListBox.SelectedItem != null;
-            OpenDump_Button.IsEnabled = IsSomethingSelected;
+            bool isSomethingSelected = CrashInfo_ListBox.SelectedItem != null;
+            OpenDump_Button.IsEnabled = isSomethingSelected;
 
-            if (IsSomethingSelected)
+            if (isSomethingSelected)
             {
                 int idx = CrashInfo_ListBox.SelectedIndex;
-                if (FilteredCrashInfos.Count > idx)
+                if (_filteredCrashInfos.Count > idx)
                 {
-                    CrashInfo_TextBox.Text = CrashInfo_ListBox.SelectedItem.ToString() + " " + CrashInfo_ListBox.SelectedIndex.ToString();
-                    CrashInfo_TextBox.Text += "\n ------------------------" + FilteredCrashInfos[idx].InfoFromCrashReporterLog;
+                    CrashInfo_TextBox.Text = CrashInfo_ListBox.SelectedItem.ToString() + " " +
+                                             CrashInfo_ListBox.SelectedIndex.ToString();
+                    CrashInfo_TextBox.Text +=
+                        "\n ------------------------" + _filteredCrashInfos[idx].InfoFromCrashReporterLog;
                     CrashInfo_TextBox.Text += "\n ------------------------ Callstack ------------------------ \n";
-                    CrashInfo_TextBox.Text += "\n" + FilteredCrashInfos[idx].FullCrash;
+                    CrashInfo_TextBox.Text += "\n" + _filteredCrashInfos[idx].FullCrash;
                     CrashInfo_TextBox.Text += "\n ------------------------ Callstack End ------------------------ \n";
-                    CrashInfo_TextBox.Text += "\n" + FilteredCrashInfos[idx].CrashContextShort;
+                    CrashInfo_TextBox.Text += "\n" + _filteredCrashInfos[idx].CrashContextShort;
                     Rename_TextBox.Text = CrashInfo_ListBox.SelectedItem.ToString() + ".7z";
-                    CrashContextInfo_TextBox.Text = FilteredCrashInfos[idx].CrashContextFull;
-                    ShortCrashContextInfo_TextBox.Text = FilteredCrashInfos[idx].CrashContextShort;
+                    CrashContextInfo_TextBox.Text = _filteredCrashInfos[idx].CrashContextFull;
+                    ShortCrashContextInfo_TextBox.Text = _filteredCrashInfos[idx].CrashContextShort;
                 }
                 else
                     MessageBox.Show("CrashInfo jest popsute");
@@ -875,8 +1050,8 @@ namespace DumpAnalyzer
         private void File_ListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             bool isSomethingSelected = file_ListBox.SelectedItem != null;
-            AnalyzeCrash_Button.IsEnabled = isSomethingSelected && CurrentWorkingMode == WorkingMode.UncheckedFtp;
-            switch (CurrentWorkingMode)
+            AnalyzeCrash_Button.IsEnabled = isSomethingSelected && _currentWorkingMode == WorkingMode.UncheckedFtp;
+            switch (_currentWorkingMode)
             {
                 case WorkingMode.UncheckedFtp:
                     break;
@@ -884,9 +1059,10 @@ namespace DumpAnalyzer
                     break;
                 case WorkingMode.CheckedVault:
                     if (isSomethingSelected)
-                    {                        
+                    {
                         ReadInfoFromVault();
                     }
+
                     OpenDump_Button.IsEnabled = isSomethingSelected;
                     break;
             }
@@ -902,7 +1078,8 @@ namespace DumpAnalyzer
         private void ReadInfoFromVault()
         {
             ListBoxItem selectedItem = (ListBoxItem)file_ListBox.SelectedItem;
-            string vaultDir = selectedItem.Content.ToString().Substring(selectedItem.Content.ToString().IndexOf('_') + 1);
+            string vaultDir = selectedItem.Content.ToString()
+                .Substring(selectedItem.Content.ToString().IndexOf('_') + 1);
             vaultDir = Path.Combine(Properties.Settings.Default.CheckedDumpsVaultPath, vaultDir);
             if (Directory.Exists(vaultDir))
             {
@@ -917,17 +1094,18 @@ namespace DumpAnalyzer
                 {
                     string callstack = InfoGatherer.ReadFile(callstackFilePath);
                     string infoFromCrashReporterLogFile = InfoGatherer.GetInfoFromCrashReporterLogFile(vaultDir);
-                    
-                    CrashInfo_TextBox.Text = "\n ------------------------ Information from crash reporter ------------------------ \n";
+
+                    CrashInfo_TextBox.Text =
+                        "\n ------------------------ Information from crash reporter ------------------------ \n";
                     CrashInfo_TextBox.Text += infoFromCrashReporterLogFile;
                     CrashInfo_TextBox.Text += "\n ------------------------ Callstack ------------------------ \n";
                     CrashInfo_TextBox.Text += callstack;
                     CrashInfo_TextBox.Text += "\n ------------------------ Callstack End ------------------------ \n";
-                    CrashInfo_TextBox.Text += "\n ------------------------ Crash Context Short ------------------------ \n";
+                    CrashInfo_TextBox.Text +=
+                        "\n ------------------------ Crash Context Short ------------------------ \n";
                     CrashInfo_TextBox.Text += "\n" + crashContextShort;
                 }
             }
-
         }
 
         private void CopyInfoToSlack_Button_Click(object sender, RoutedEventArgs e)
@@ -940,16 +1118,20 @@ namespace DumpAnalyzer
                 if (CrashInfo_ListBox.SelectedItem != null)
                 {
                     int idx = CrashInfo_ListBox.SelectedIndex;
-                    if (FilteredCrashInfos.Count > idx)
+                    if (_filteredCrashInfos.Count > idx)
                     {
-                        titleToSend = FilteredCrashInfos[idx].CallstackTop + "  rev. " + FilteredCrashInfos[idx].Revision.ToString();
+                        titleToSend = _filteredCrashInfos[idx].CallstackTop + "  rev. " +
+                                      _filteredCrashInfos[idx].Revision.ToString();
 
-                        string s = FilteredCrashInfos[idx].FullCrash;
+                        string s = _filteredCrashInfos[idx].FullCrash;
 
-                        infoToSend += "Name: " + FilteredCrashInfos[idx].FullName.Substring(FilteredCrashInfos[idx].FullName.IndexOf(Properties.Settings.Default.Project_CodenameShort, StringComparison.Ordinal)) + "\n\n";
+                        infoToSend += "Name: " + _filteredCrashInfos[idx].FullName.Substring(_filteredCrashInfos[idx]
+                            .FullName.IndexOf(Properties.Settings.Default.Project_CodenameShort,
+                                StringComparison.Ordinal)) + "\n\n";
 
-                        infoToSend += FilteredCrashInfos[idx].InfoFromCrashReporterLog;
-                        infoToSend += " \n --------------- CALLSTACK --------------- \n" + FilteredCrashInfos[idx].FullCrash;
+                        infoToSend += _filteredCrashInfos[idx].InfoFromCrashReporterLog;
+                        infoToSend += " \n --------------- CALLSTACK --------------- \n" +
+                                      _filteredCrashInfos[idx].FullCrash;
                     }
                     else
                         MessageBox.Show("CrashInfo jest popsute");
@@ -962,9 +1144,9 @@ namespace DumpAnalyzer
             catch (Exception ex)
             {
                 Logger.Log("Error on sending info to slack: " + ex.ToString());
-                MessageBox.Show("Error on sending info to slack: " + ex.ToString(), @"Cos nie zabanglało", MessageBoxButton.OK);
+                MessageBox.Show("Error on sending info to slack: " + ex.ToString(), @"Cos nie zabanglało",
+                    MessageBoxButton.OK);
             }
-
         }
 
         private void Window_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -1003,18 +1185,23 @@ namespace DumpAnalyzer
             }
 
             return "UNKNOWN";
-        }        
-
-        private bool IsRevisionOK(int Revision)
-        {
-            return IsRevisionOK(Revision.ToString());
         }
 
-        private bool IsRevisionOK(string RevisionWithVersion)
+        private bool IsRevisionOk(int revision)
         {
-            string directoryWithPdb = Path.Combine(GetMainDumpPath(), RevisionWithVersion);
-            string pdbFile = Path.Combine(directoryWithPdb, $"{Properties.Settings.Default.Project_Codename}.pdb");
-            return Directory.Exists(directoryWithPdb) && File.Exists(pdbFile);
+            return IsRevisionOk(revision.ToString());
+        }
+
+        private bool IsRevisionOk(string revisionWithVersion)
+        {
+            string directoryWithPdb = Path.Combine(GetMainDumpPath(), revisionWithVersion);
+            if (Directory.Exists(directoryWithPdb))
+            {
+                string[] pdbFiles = Directory.GetFiles(directoryWithPdb, "*.pdb", SearchOption.AllDirectories);
+                return pdbFiles.Length > 0;
+            }
+
+            return false;
         }
 
         private void DeleteDirectory(string dirToDelete, bool recursive)
@@ -1034,15 +1221,17 @@ namespace DumpAnalyzer
         private string GenerateCallstackWithCdb(string dirName)
         {
             string dmpPath = GetDumpPath(dirName);
-            string cdb_debugger = Path.Combine(debuggersPath, _cdb);
+            string cdbDebugger = Path.Combine(_debuggersPath, _cdb);
             string revision = GetRevisionFromFileName(dirName);
             string binaryDir = Path.Combine(GetMainDumpPath(), revision.ToString());
-            string args = @" -z " + dmpPath + @" -y srv*" + symbolsPath + "*https://msdl.microsoft.com/download/symbols;" + binaryDir + @";" + symbolsPath + @" -c "".ecxr;.lines -e;k;qq""";
+            string args = @" -z " + dmpPath + @" -y srv*" + _symbolsPath +
+                          "*https://msdl.microsoft.com/download/symbols;" + binaryDir + @";" + _symbolsPath +
+                          @" -c "".ecxr;.lines -e;k;qq""";
             string output = "";
-            if (File.Exists(cdb_debugger))
+            if (File.Exists(cdbDebugger))
             {
                 Process cdbProcess = new Process();
-                cdbProcess.StartInfo.FileName = cdb_debugger;
+                cdbProcess.StartInfo.FileName = cdbDebugger;
                 cdbProcess.StartInfo.Arguments = args;
                 cdbProcess.StartInfo.RedirectStandardError = true;
                 cdbProcess.StartInfo.RedirectStandardOutput = true;
@@ -1060,24 +1249,38 @@ namespace DumpAnalyzer
 
                 cdbProcess.Start();
                 cdbProcess.BeginOutputReadLine();
-                cdbProcess.WaitForExit();
+                //cdbProcess.WaitForExit();
+
+                string oldStatusBarString = StatusBar_TextBlock.Text;
+                while (!cdbProcess.HasExited)
+                {
+                    string timerString = " ";
+                    for (int i = 0; i < 3; ++i)
+                    {
+                        timerString += ". ";
+                        Thread.Sleep(500);
+                        UpdateStatusBar($"{oldStatusBarString}  {timerString}");
+                    }
+                    
+                }
+                    
             }
 
             return output;
         }
 
-        private void ClearCallstackFromCDB(ref string OutCallstack)
+        private void ClearCallstackFromCdb(ref string outCallstack)
         {
             string tempString = @"  *** Stack trace for last set context - .thread/.cxr resets it";
-            int idx1 = OutCallstack.IndexOf(tempString);
-            int idx2 = OutCallstack.IndexOf(@"quit:");
+            int idx1 = outCallstack.IndexOf(tempString);
+            int idx2 = outCallstack.IndexOf(@"quit:");
             if (idx2 > idx1)
             {
-                OutCallstack = OutCallstack.Substring(idx1, idx2 - idx1);
+                outCallstack = outCallstack.Substring(idx1, idx2 - idx1);
             }
 
-            string[] lines = OutCallstack.Split('\n');
-            string TempCallstack = "";
+            string[] lines = outCallstack.Split('\n');
+            string tempCallstack = "";
             bool bStart = false;
             string tempCallstackTop = "";
 
@@ -1087,18 +1290,23 @@ namespace DumpAnalyzer
                 {
                     if (lines[i].Length > 36)
                     {
-                        string CallstackFunction = lines[i].Substring(36);
+                        string callstackFunction = lines[i].Substring(36);
 
-                        TempCallstack += CallstackFunction + "\n";
+                        tempCallstack += callstackFunction + "\n";
 
-                        if (!CallstackFunction.Contains(@"KERNELBASE") && !CallstackFunction.Contains(@"RaiseException") && !CallstackFunction.Contains(@"Logf") && !CallstackFunction.Contains(@"AssertFailed") && !CallstackFunction.Contains(@"NO-FUNCTION"))
+                        if (!callstackFunction.Contains(@"KERNELBASE") &&
+                            !callstackFunction.Contains(@"RaiseException") && !callstackFunction.Contains(@"Logf") &&
+                            !callstackFunction.Contains(@"AssertFailed") && !callstackFunction.Contains(@"NO-FUNCTION"))
                         {
-                            tempCallstackTop = CallstackFunction;
+                            tempCallstackTop = callstackFunction;
                             string[] tabs = tempCallstackTop.Split('!');
                             if (tabs.Length == 2)
                             {
-                                tempCallstackTop = tabs[1].Replace("::", "-").Replace("<", "-").Replace(">", "-").Replace("*", "-");
-                                tempCallstackTop = tempCallstackTop.Contains('+') ? tempCallstackTop.Split('+').First() : tempCallstackTop.Split('[').First();
+                                tempCallstackTop = tabs[1].Replace("::", "-").Replace("<", "-").Replace(">", "-")
+                                    .Replace("*", "-");
+                                tempCallstackTop = tempCallstackTop.Contains('+')
+                                    ? tempCallstackTop.Split('+').First()
+                                    : tempCallstackTop.Split('[').First();
                                 tempCallstackTop = tempCallstackTop.Trim();
                             }
                         }
@@ -1110,72 +1318,79 @@ namespace DumpAnalyzer
             }
         }
 
-        private List<string> GetFullCallstackFromCDB(ref string InCallstack)
+        private List<string> GetFullCallstackFromCdb(ref string inCallstack)
         {
-            string CallStackTop = "Unknown";
-            List<string> CallstackLines = new List<string>(InCallstack.Split('\n').Where(x => !string.IsNullOrEmpty(x)));
-            CallStackTop = CallstackLines[0];
-            CallStackTop = CallStackTop.Split(new string[] { "!" }, StringSplitOptions.RemoveEmptyEntries).Last().Split(new string[] { "()" }, StringSplitOptions.RemoveEmptyEntries).First();
-            CallStackTop = CallStackTop.Trim(new char[] { '\n', '\r' });
-            CallStackTop = CallStackTop.Replace("::", "-").Replace("<", "-").Replace(">", "-").Replace("*", "-");
-            CallStackTop = CallStackTop.Replace("_", "-").Replace("<", "-").Replace(">", "-").Replace("*", "-");
-            if ((CallStackTop.Contains("Assert") || CallStackTop.Contains("VCRUNTIME")) && CallstackLines.Count > 1)
+            string callStackTop = "Unknown";
+            List<string> callstackLines =
+                new List<string>(inCallstack.Split('\n').Where(x => !string.IsNullOrEmpty(x)));
+            callStackTop = callstackLines[0];
+            callStackTop = callStackTop.Split(new string[] { "!" }, StringSplitOptions.RemoveEmptyEntries).Last()
+                .Split(new string[] { "()" }, StringSplitOptions.RemoveEmptyEntries).First();
+            callStackTop = callStackTop.Trim(new char[] { '\n', '\r' });
+            callStackTop = callStackTop.Replace("::", "-").Replace("<", "-").Replace(">", "-").Replace("*", "-");
+            callStackTop = callStackTop.Replace("_", "-").Replace("<", "-").Replace(">", "-").Replace("*", "-");
+            if ((callStackTop.Contains("Assert") || callStackTop.Contains("VCRUNTIME")) && callstackLines.Count > 1)
             {
-                CallStackTop = CallstackLines[1];
-                CallStackTop = CallStackTop.Split(new string[] { "!" }, StringSplitOptions.RemoveEmptyEntries).Last().Split(new string[] { "()" }, StringSplitOptions.RemoveEmptyEntries).First();
-                CallStackTop = CallStackTop.Trim(new char[] { '\n', '\r' });
-                CallStackTop = CallStackTop.Replace("::", "-").Replace("<", "-").Replace(">", "-").Replace("*", "-");
-                CallStackTop = CallStackTop.Replace("_", "-").Replace("<", "-").Replace(">", "-").Replace("*", "-");
+                callStackTop = callstackLines[1];
+                callStackTop = callStackTop.Split(new string[] { "!" }, StringSplitOptions.RemoveEmptyEntries).Last()
+                    .Split(new string[] { "()" }, StringSplitOptions.RemoveEmptyEntries).First();
+                callStackTop = callStackTop.Trim(new char[] { '\n', '\r' });
+                callStackTop = callStackTop.Replace("::", "-").Replace("<", "-").Replace(">", "-").Replace("*", "-");
+                callStackTop = callStackTop.Replace("_", "-").Replace("<", "-").Replace(">", "-").Replace("*", "-");
             }
 
-            if (CallStackTop == "")
-                CallStackTop = "Unknown";
-            return CallstackLines;
-        }        
+            if (callStackTop == "")
+                callStackTop = "Unknown";
+            return callstackLines;
+        }
 
-        private void ProcessNewCallstackCDB(ref string NewCallstack, ref string CallstackTop)
+        private void ProcessNewCallstackCdb(ref string newCallstack, ref string callstackTop)
         {
             string tempString = @"  *** Stack trace for last set context - .thread/.cxr resets it";
             tempString = @"Call Site";
-            int idx1 = NewCallstack.IndexOf(tempString) + 9;
-            int idx2 = NewCallstack.IndexOf(@"quit:");
+            int idx1 = newCallstack.IndexOf(tempString) + 9;
+            int idx2 = newCallstack.IndexOf(@"quit:");
             if (idx2 > idx1)
             {
-                NewCallstack = NewCallstack.Substring(idx1, idx2 - idx1);
+                newCallstack = newCallstack.Substring(idx1, idx2 - idx1);
             }
 
-            string[] lines = NewCallstack.Split(new char[] {'\n'}, StringSplitOptions.RemoveEmptyEntries);
-            string TempCallstack = "";            
-            string tempCallstackTop = CallstackTop;
+            string[] lines = newCallstack.Split(new char[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            string tempCallstack = "";
+            string tempCallstackTop = callstackTop;
 
             for (int i = 0; i < lines.Length; ++i)
             {
                 if (lines[i].Length > 36)
                 {
                     lines[i] = lines[i].Substring(36);
-                    string CallstackFunction = lines[i];
-                    TempCallstack += $"{i:D2} - {CallstackFunction}\n";
+                    string callstackFunction = lines[i];
+                    tempCallstack += $"{i:D2} - {callstackFunction}\n";
 
                     //if (stringArray.Any(stringToCheck.Contains))
                     //if (!CallstackFunction.Contains(@"KERNELBASE") && !CallstackFunction.Contains(@"RaiseException") && !CallstackFunction.Contains(@"Logf") && !CallstackFunction.Contains(@"AssertFailed") && !CallstackFunction.Contains(@"NO-FUNCTION") && tempCallstackTop == CallstackTop)
-                    if (!callstackTopExcludedWords.Any(CallstackFunction.Contains) && tempCallstackTop == CallstackTop)
+                    if (!CallstackTopExcludedWords.Any(callstackFunction.Contains) && tempCallstackTop == callstackTop)
                     {
-                        tempCallstackTop = CallstackFunction;
+                        tempCallstackTop = callstackFunction;
                         string[] tabs = tempCallstackTop.Split('!');
                         if (tabs.Length == 2)
                         {
-                            CallstackTop = tabs[1].Replace("::", "-").Replace("<", "-").Replace(">", "-").Replace("*", "-");
-                            CallstackTop = CallstackTop.Contains('+') ? CallstackTop.Split('+').First() : CallstackTop.Split('[').First();
-                            CallstackTop = CallstackTop.Trim();
+                            callstackTop = tabs[1].Replace("::", "-").Replace("<", "-").Replace(">", "-")
+                                .Replace("*", "-");
+                            callstackTop = callstackTop.Contains('+')
+                                ? callstackTop.Split('+').First()
+                                : callstackTop.Split('[').First();
+                            callstackTop = callstackTop.Trim();
                         }
                     }
                 }
             }
 
-            NewCallstack = TempCallstack.Trim();
+            newCallstack = tempCallstack.Trim();
         }
 
-        private void CreateCallstackFile(ref string newCallstack, ref string callstackTop, string targetDirectory, string orginalFileName)
+        private void CreateCallstackFile(ref string newCallstack, ref string callstackTop, string targetDirectory,
+            string orginalFileName)
         {
             string newFileName = Path.Combine(targetDirectory, "callstack.txt");
             using (StreamWriter sw = File.CreateText(newFileName))
@@ -1187,27 +1402,26 @@ namespace DumpAnalyzer
                 sw.WriteLine(newCallstack);
             }
         }
+
         private async void Configure_Button_Click(object sender, RoutedEventArgs e)
         {
             string newRevision = Configure_TextBox.Text;
-            StatusBar_TextBlock.Text = "Trying to configure revision: " + newRevision + " Downloading PDB - this may take a while";
+            StatusBar_TextBlock.Text = "Trying to configure revision: " + newRevision +
+                                       " Downloading PDB - this may take a while";
             StatusBar_TextBlock.InvalidateVisual();
             StatusBar_TextBlock.UpdateLayout();
-            StatusBar_TextBlock.UpdateDefaultStyle();            
-            await Task.Factory.StartNew((() =>
-            {
-                ConfigureHelper.FullConfiguration(newRevision);
-            }));
+            StatusBar_TextBlock.UpdateDefaultStyle();
+            await Task.Factory.StartNew((() => { ConfigureHelper.FullConfiguration(newRevision); }));
             StatusBar_TextBlock.Text = "Completed configuring of revision: " + newRevision;
         }
 
         private void Settings_Button_Click(object sender, RoutedEventArgs e)
         {
-            SettingsWindow SettingsWin = new SettingsWindow
+            SettingsWindow settingsWin = new SettingsWindow
             {
                 Owner = this
             };
-            SettingsWin.ShowDialog();
+            settingsWin.ShowDialog();
         }
     }
 }

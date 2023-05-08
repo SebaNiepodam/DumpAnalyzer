@@ -3,6 +3,7 @@ using Renci.SshNet.Common;
 using Renci.SshNet.Sftp;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -46,8 +47,13 @@ namespace DumpAnalyzer
             {
                 using (SftpClient sftpClient = new SftpClient(GetConnectionInfo()))
                 {
+                    Stopwatch sw = Stopwatch.StartNew();
                     sftpClient.Connect();
+                    float connectTime = sw.ElapsedMilliseconds;
+                    sw.Restart();
                     IEnumerable<SftpFile> ListOfFiles = sftpClient.ListDirectory(Properties.Settings.Default.FTP_RootFolder);
+                    float listDirTime = sw.ElapsedMilliseconds;
+                    sw.Restart();
                     foreach (SftpFile File in ListOfFiles)
                     {
                         if (File.Name.Contains(Properties.Settings.Default.Project_CodenameShort) && File.Name.Contains(".7z"))
@@ -55,9 +61,11 @@ namespace DumpAnalyzer
                             filesOnServer.Add(File.Name);
                         }
                     }
+                    float addingToListTime = sw.ElapsedMilliseconds;
+                    sw.Stop();
+                    Console.WriteLine($@"connect: {connectTime}  List: {listDirTime}  Add: {addingToListTime}");
 
                     sftpClient.Dispose();
-                    Console.WriteLine("Directory List Complete, status");
 
                     //StatusBar_TextBlock.Text = "Checking FTP finished. Found: " + file_ListBox.Items.Count + " files.";
                 }
