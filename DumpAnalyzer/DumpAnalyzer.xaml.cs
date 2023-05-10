@@ -695,7 +695,7 @@ namespace DumpAnalyzer
             string targetDirectory = Path.GetDirectoryName(dumpPath);
             foreach (string pdbFile in pdbFiles)
             {
-                string fileName = Path.GetFileName(pdbFiles[0]);
+                string fileName = Path.GetFileName(pdbFile);
                 string mklinkCommand = @"/C mklink /h " + targetDirectory + "\\" + fileName + " " + pdbFile;
                 Process.Start("cmd.exe", mklinkCommand).WaitForExit();
                 Thread.Sleep(300);
